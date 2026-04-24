@@ -8,8 +8,6 @@ import numpy as np
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.multioutput import MultiOutputRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error
 
 # Librerías para Scraping Avanzado (Selenium)
 from selenium import webdriver
@@ -18,7 +16,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
+# webdriver_manager HA SIDO ELIMINADO para compatibilidad con Streamlit Cloud
 
 # ==========================================
 # CONFIGURACIÓN DE LA PÁGINA
@@ -36,15 +34,21 @@ st.markdown("""
 # ==========================================
 def iniciar_driver():
     """
-    Configura e inicia una instancia de Chrome Headless.
+    Configura e inicia una instancia de Chromium Headless.
+    Adaptado específicamente para el entorno Linux de Streamlit Community Cloud.
     """
     chrome_options = Options()
-    chrome_options.add_argument("--headless")  # Ejecutar sin ventana gráfica para velocidad
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--headless=new")  # Nueva sintaxis headless recomendada
+    chrome_options.add_argument("--no-sandbox") # Crucial para entornos Docker/Linux
+    chrome_options.add_argument("--disable-dev-shm-usage") # Previene errores de memoria en contenedores
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920x1080")
     
-    # Instalación automática del driver compatible
-    service = Service(ChromeDriverManager().install())
+    # Rutas absolutas donde Streamlit Cloud (Debian) instala Chromium vía packages.txt
+    chrome_options.binary_location = "/usr/bin/chromium"
+    service = Service("/usr/bin/chromedriver")
+    
+    # Inicializar el driver con las rutas del sistema
     driver = webdriver.Chrome(service=service, options=chrome_options)
     return driver
 
@@ -70,23 +74,16 @@ def scrapear_con_selenium(url_inicial, stop_at_sorteo_1=True, max_pages=10):
         page_count = 0
         
         while page_count < max_pages:
-            # 1. Extraer datos de la página actual
-            # Buscamos todos los contenedores de números y sorteos visibles en la pantalla actual
-            # Nota: La estructura suele ser una lista de sorteos por página.
-            
             # Buscamos los elementos usando los data-bind específicos que indicaste
             elementos_sorteo = driver.find_elements(By.CSS_SELECTOR, "div[data-bind*='text: drawNumber']")
             elementos_numeros = driver.find_elements(By.CSS_SELECTOR, "div[data-bind*='getResultNumbersString']")
             
-            # Iteramos sobre los elementos encontrados en la vista actual
-            # Asumimos que están en orden (el primer sorteo corresponde a los primeros números)
             for i in range(len(elementos_sorteo)):
                 try:
                     sorteo_id = elementos_sorteo[i].text.strip()
                     numeros_raw = elementos_numeros[i].text.strip()
                     
                     if sorteo_id and numeros_raw:
-                        # Convertir a int para verificar si llegamos al 1
                         sorteo_int = int(sorteo_id)
                         
                         # Evitar duplicados si la paginación solapa
@@ -109,11 +106,7 @@ def scrapear_con_selenium(url_inicial, stop_at_sorteo_1=True, max_pages=10):
             
             # 2. Navegación (Paginación)
             try:
-                # Buscamos el botón 'Siguiente página' según tu selector
-                # El selector CSS busca un <a> que contenga el evento click goToNextPage
                 next_btn = driver.find_element(By.CSS_SELECTOR, "a[data-bind*='click:  goToNextPage']")
-                
-                # Verificamos si está inactivo (clase 'inactive')
                 classes = next_btn.get_attribute("class")
                 if "inactive" in classes:
                     status_text.text("Se alcanzó la última página (botón inactivo).")
@@ -121,8 +114,6 @@ def scrapear_con_selenium(url_inicial, stop_at_sorteo_1=True, max_pages=10):
                 
                 # Hacemos click
                 driver.execute_script("arguments[0].click();", next_btn)
-                
-                # Esperamos brevemente a que Knockout actualice el DOM
                 time.sleep(1) 
                 
             except Exception as e:
@@ -147,7 +138,6 @@ def procesar_datos(df):
         return df
 
     def split_numbers(row):
-        # Formato: "11, 12, 13, 14, 16, 39 | 2"
         raw = row['Numeros Ganadores']
         raw = raw.replace('|', ',') 
         parts = [p.strip() for p in raw.split(',')]
@@ -163,7 +153,6 @@ def procesar_datos(df):
     new_cols.columns = ['N1', 'N2', 'N3', 'N4', 'N5', 'N6', 'Comodin']
     
     df_final = pd.concat([df['Numero de sorteo'], new_cols], axis=1)
-    # Aseguramos orden descendente por Sorteo
     df_final = df_final.sort_values(by='Numero de sorteo', ascending=False)
     
     return df_final
@@ -176,17 +165,11 @@ def crear_dataset_supervisado(data, window_size=5):
     Crea ventanas de tiempo para entrenamiento.
     """
     X, y = [], []
-    # Seleccionamos solo las bolas principales (N1 a N6)
     valores = data[['N1', 'N2', 'N3', 'N4', 'N5', 'N6']].values
-    
-    # Invertimos para que el orden sea cronológico (Sorteo 1 -> Sorteo 5000)
-    # Esto es crucial para que el modelo aprenda la secuencia histórica real.
     valores = valores[::-1] 
     
     for i in range(len(valores) - window_size):
-        # Input: Ventana de 'window_size' sorteos previos
         X.append(valores[i:i+window_size].flatten())
-        # Target: El siguiente sorteo
         y.append(valores[i+window_size])
         
     return np.array(X), np.array(y)
@@ -199,14 +182,12 @@ def entrenar_y_predecir(df, modelos_seleccionados, n_predicciones=3):
         st.warning("Datos insuficientes para ML.")
         return {}
 
-    # Tomamos los últimos 'window_size' registros REALES para empezar a predecir el futuro
     ultimos_datos_reales = df[['N1', 'N2', 'N3', 'N4', 'N5', 'N6']].head(window_size).values[::-1]
     input_inicial = ultimos_datos_reales.flatten().reshape(1, -1)
     
     resultados = {}
 
     for nombre, modelo_base in modelos_seleccionados.items():
-        # MultiOutputRegressor permite predecir 6 variables al mismo tiempo
         model = MultiOutputRegressor(modelo_base)
         model.fit(X, y)
         
@@ -216,15 +197,11 @@ def entrenar_y_predecir(df, modelos_seleccionados, n_predicciones=3):
         for _ in range(n_predicciones):
             pred = model.predict(current_input)
             pred = np.round(pred).astype(int)
-            pred = np.clip(pred, 1, 41) # Restricción de dominio del Loto
-            
-            # Ordenamos los números para presentación (como en el cartón)
+            pred = np.clip(pred, 1, 41)
             pred[0].sort()
             
             predicciones_serie.append(pred[0])
             
-            # Actualizamos la ventana deslizante:
-            # Eliminamos el sorteo más antiguo (primeros 6 elementos) y añadimos la nueva predicción al final
             nuevo_input = np.append(current_input[0][6:], pred[0]).reshape(1, -1)
             current_input = nuevo_input
             
@@ -241,12 +218,12 @@ def main():
     modo = st.sidebar.selectbox("Modo de Operación", ["Cargar CSV Existente", "Nuevo Scraping (Selenium)", "Datos de Prueba"])
     
     if modo == "Nuevo Scraping (Selenium)":
-        st.sidebar.info("Requiere Chrome instalado en el servidor/local.")
+        st.sidebar.info("Ejecutando en entorno Cloud con Chromium Headless.")
         url_target = st.sidebar.text_input("URL Objetivo", "https://www.polla.cl/es/view/resultados/5271")
         max_pags = st.sidebar.number_input("Máximas Páginas a recorrer", value=5, min_value=1, max_value=1000)
         
         if st.sidebar.button("Iniciar Robot"):
-            with st.spinner("Iniciando navegador virtual... esto puede tardar unos segundos."):
+            with st.spinner("Iniciando navegador virtual en el servidor... esto puede tardar unos segundos."):
                 df_raw = scrapear_con_selenium(url_target, max_pages=max_pags)
                 
             if not df_raw.empty:
@@ -302,7 +279,7 @@ def main():
                 mostrar_resultados(col2, items[1][0], items[1][1])
                 mostrar_resultados(col3, items[2][0], items[2][1])
             
-            st.warning("Recuerda: El Loto es un juego de azar con eventos independientes. Estas predicciones son ejercicios matemáticos de búsqueda de patrones, no garantía de ganancia, jajajaj.")
+            st.warning("Recuerda: El Loto es un juego de azar con eventos independientes. Estas predicciones son ejercicios matemáticos de búsqueda de patrones, no garantía de ganancia.")
 
 if __name__ == "__main__":
     main()
